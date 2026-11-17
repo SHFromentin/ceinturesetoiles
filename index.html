@@ -2819,8 +2819,8 @@ document.addEventListener('DOMContentLoaded', () => {
     // --- création du lien (téléphone) ---
     async function ltCreate() {
         let url;
-        try { url = LT_BASE + '#donnees=' + await ltPack(JSON.stringify(appState)); } catch (e) { toast('Impossible de créer le lien.'); return; }
-        syShowModal('lt-modal', `<h3 class="text-xl font-bold mb-2 font-title">🔗 Lien de transfert</h3><ol class="text-sm text-gray-700 mb-3" style="list-style:decimal;padding-left:1.2rem;"><li><b>Le plus simple :</b> touche « 📱 QR code » et scanne-le avec le scanner de la tablette.</li><li><b>Sinon :</b> copie le lien, ajoute-le comme site autorisé dans le contrôle parental de Samsung Kids, ouvre ce favori en mode enfant, puis supprime-le.</li></ol><textarea id="lt-url" readonly class="w-full h-28 p-2 border rounded-md font-mono text-xs" style="word-break:break-all;">${url}</textarea><p class="text-xs text-gray-500 mt-1">${url.length} caractères. Le lien contient toutes les données : ne le diffuse pas.</p><div class="flex flex-wrap justify-end gap-2 mt-4"><button data-lt="close" class="bg-gray-300 px-4 py-2">Fermer</button>${navigator.share ? '<button data-lt="share" class="bg-gray-600 text-white px-4 py-2">📤 Partager</button>' : ''}<button data-ltq="show" class="bg-purple-600 text-white px-4 py-2">📱 QR code</button><button data-lt="copy" class="bg-indigo-600 text-white px-4 py-2">📋 Copier le lien</button></div>`);
+        try { url = LT_BASE + '#donnees=' + await ltPack(ltLight()); } catch (e) { toast('Impossible de créer le lien.'); return; }
+        syShowModal('lt-modal', `<h3 class="text-xl font-bold mb-2 font-title">🔗 Lien de transfert</h3><ol class="text-sm text-gray-700 mb-3" style="list-style:decimal;padding-left:1.2rem;"><li><b>Le plus simple :</b> touche « 📱 QR code » et scanne-le avec le scanner de la tablette.</li><li><b>Ou :</b> copie le lien et colle-le sur la tablette dans « Restaurer via Copier/Coller » (ou « Fusionner (copier/coller) »).</li></ol><textarea id="lt-url" readonly class="w-full h-28 p-2 border rounded-md font-mono text-xs" style="word-break:break-all;">${url}</textarea><p class="text-xs text-gray-500 mt-1">${url.length} caractères. Les images (icônes) ne sont pas incluses : la tablette garde les siennes. Le lien contient toutes les autres données : ne le diffuse pas.</p><div class="flex flex-wrap justify-end gap-2 mt-4"><button data-lt="close" class="bg-gray-300 px-4 py-2">Fermer</button>${navigator.share ? '<button data-lt="share" class="bg-gray-600 text-white px-4 py-2">📤 Partager</button>' : ''}<button data-ltq="show" class="bg-purple-600 text-white px-4 py-2">📱 QR code</button><button data-lt="copy" class="bg-indigo-600 text-white px-4 py-2">📋 Copier le lien</button></div>`);
     }
     async function ltCopy() {
         const ta = document.getElementById('lt-url'); if (!ta) return;
@@ -2862,6 +2862,45 @@ document.addEventListener('DOMContentLoaded', () => {
             else { try { handleRestore(data); } catch (err) { alert('Erreur : ' + err.message); } }
         }
     });
+    // --- transferts allégés : les images (icônes de classes et de domaines) ne voyagent pas dans le lien ---
+    // Elles sont remplacées par une empreinte ; l'appareil qui reçoit remet les images qu'il possède déjà.
+    function ltIsImg(v) { return typeof v === 'string' && v.startsWith('data:') && v.length > 300; }
+    function ltImgKey(s) { let a = 5381, b = 52711; for (let i = 0; i < s.length; i++) { const c = s.charCodeAt(i); a = ((a * 33) ^ c) >>> 0; b = (b * 31 + c) >>> 0; } return 'img:' + a.toString(36) + b.toString(36) + '.' + s.length.toString(36); }
+    function ltLight() { return JSON.stringify(appState, (k, v) => k === '_base' ? undefined : (ltIsImg(v) ? ltImgKey(v) : v)); }
+    function ltResolve(data) {
+        if (!data || typeof data !== 'object') return 0;
+        const have = {}; JSON.stringify(appState, (k, v) => { if (ltIsImg(v)) have[ltImgKey(v)] = v; return v; });
+        let miss = 0;
+        const walk = o => { for (const k in o) { const v = o[k]; if (typeof v === 'string' && v.startsWith('img:')) { if (have[v]) o[k] = have[v]; else { o[k] = null; miss++; } } else if (v && typeof v === 'object') walk(v); } };
+        walk(data); return miss;
+    }
+    const _ltHandleRestore = handleRestore;
+    handleRestore = function (data) {
+        const miss = ltResolve(data);
+        _ltHandleRestore(data);
+        if (miss && appState === data) setTimeout(() => toast('🖼️ ' + miss + " image(s) (icônes de classe ou de domaine) absente(s) de cet appareil : elles sont restées vides. Pour les récupérer, fais une fois un transfert complet (« Transférer » puis copier/coller du fichier).", 12000), 1500);
+    };
+    const _ltPlanMerge = syPlanMerge;
+    syPlanMerge = function (files) { (files || []).forEach(f => ltResolve(f && f.data)); return _ltPlanMerge(files); };
+
+    // --- un lien de transfert peut aussi être collé dans « Restaurer via Copier/Coller » ou « Fusionner (copier/coller) » ---
+    document.addEventListener('click', async e => {
+        let ta = null, mode = null;
+        if (e.target.id === 'confirm-paste-restore') { ta = document.getElementById('paste-restore-textarea'); mode = 'restore'; }
+        else if (e.target.closest && e.target.closest('[data-sync="paste-analyze"]')) { ta = document.getElementById('sy-paste-text'); mode = 'merge'; }
+        if (!ta) return;
+        const m = /donnees=([zj])\.([A-Za-z0-9_\-]+)/.exec(ta.value || '');
+        if (!m) return;
+        e.stopImmediatePropagation(); e.preventDefault();
+        let data;
+        try { data = JSON.parse(await ltUnpack(m[1], m[2])); if (!data || !data.classes) throw new Error('contenu inattendu'); }
+        catch (err) { alert('Lien de transfert illisible ou incomplet (' + err.message + ').\n\nVérifie que tout le lien a été copié.'); return; }
+        if (mode === 'restore') {
+            const modal = document.getElementById('paste-restore-modal');
+            if (modal) { modal.classList.add('hidden'); modal.style.display = 'none'; }
+            try { handleRestore(data); } catch (err) { alert('Erreur : ' + err.message); }
+        } else { syCloseModals(); syOpenMerge([{ name: 'lien collé', data }]); }
+    }, true);
     window.addEventListener('hashchange', ltFromLink);
     setTimeout(ltFromLink, 0);
 
@@ -2922,6 +2961,229 @@ document.addEventListener('DOMContentLoaded', () => {
     });
     window.addEventListener('hashchange', ltqFromLink);
     setTimeout(ltqFromLink, 0);
+
+    // === SYNCHRONISATION AVEC L'ORDINATEUR DE LA CLASSE (programme « serveur_ceintures.exe », même wifi) ===
+    // L'ordinateur garde la version de référence. Chaque appareil envoie ses changements et récupère ceux des autres
+    // toutes les quelques secondes. Sans ordinateur, les changements restent sur l'appareil et partent à son retour.
+    const SRV = { on: false, id: null, version: 0, timer: null, busy: false, last: 0, ok: null, err: '', empty: false };
+    const SRV_BASE_KEY = 'srvBase', SRV_META_KEY = 'srvMeta', SRV_LOCAL = ['sync', 'lastBackup', '_base'];
+    function srvGetMeta() { try { return JSON.parse(localStorage.getItem(SRV_META_KEY) || 'null'); } catch (e) { return null; } }
+    function srvGetBase() { try { return localStorage.getItem(SRV_BASE_KEY); } catch (e) { return null; } }
+    function srvSetBase(id, version, light) { try { localStorage.setItem(SRV_BASE_KEY, light); localStorage.setItem(SRV_META_KEY, JSON.stringify({ id, version })); } catch (e) { } }
+    function srvShared(o) { const c = Object.assign({}, o); SRV_LOCAL.forEach(k => delete c[k]); return c; }
+    function srvLight(o) { return JSON.stringify(srvShared(o), (k, v) => ltIsImg(v) ? ltImgKey(v) : v); }
+    function srvImgMap(...objs) { const m = {}; objs.forEach(o => JSON.stringify(o, (k, v) => { if (ltIsImg(v)) m[ltImgKey(v)] = v; return v; })); return m; }
+    function srvResolve(o, m) { const walk = x => { for (const k in x) { const v = x[k]; if (typeof v === 'string' && v.startsWith('img:') && m[v]) x[k] = m[v]; else if (v && typeof v === 'object') walk(v); } }; walk(o); return o; }
+
+    // --- fusion à trois voies : base (dernier état commun), local (cet appareil), distant (ordinateur) ---
+    const srvJ = x => x === undefined ? '\u0000' : JSON.stringify(x);
+    const srvIsObj = x => !!x && typeof x === 'object' && !Array.isArray(x);
+    const srvById = a => Array.isArray(a) && a.every(e => srvIsObj(e) && (typeof e.id === 'string' || typeof e.id === 'number')) && new Set(a.map(e => e.id)).size === a.length;
+    function srvMerge(b, l, r) {
+        const jl = srvJ(l), jr = srvJ(r);
+        if (jl === jr) return l;
+        const jb = srvJ(b);
+        if (jl === jb) return r;          // seul l'ordinateur a changé
+        if (jr === jb) return l;          // seul cet appareil a changé
+        if (srvIsObj(l) && srvIsObj(r)) { // les deux ont changé : on descend champ par champ
+            const bb = srvIsObj(b) ? b : {}, out = {};
+            new Set([...Object.keys(r), ...Object.keys(l)]).forEach(k => { const v = srvMerge(bb[k], l[k], r[k]); if (v !== undefined) out[k] = v; });
+            return out;
+        }
+        if (Array.isArray(l) && Array.isArray(r)) {
+            const ba = Array.isArray(b) ? b : [];
+            if (srvById(l) && srvById(r) && (!ba.length || srvById(ba))) { // élèves, domaines, demandes d'aide… : par identifiant
+                const bm = new Map(ba.map(e => [e.id, e])), lm = new Map(l.map(e => [e.id, e])), rm = new Map(r.map(e => [e.id, e]));
+                const out = [];
+                [...r.map(e => e.id), ...l.map(e => e.id).filter(id => !rm.has(id))].forEach(id => { const v = srvMerge(bm.get(id), lm.get(id), rm.get(id)); if (v !== undefined) out.push(v); });
+                return out;
+            }
+            // inscriptions, historique… : ajouts et retraits de chaque côté
+            const cnt = a => { const m = new Map(); a.forEach(e => { const k = srvJ(e); m.set(k, (m.get(k) || 0) + 1); }); return m; };
+            const cb = cnt(ba), cl = cnt(l), cr = cnt(r), out = [];
+            const del = new Map(); cb.forEach((n, k) => { const d = n - (cl.get(k) || 0); if (d > 0) del.set(k, d); });
+            r.forEach(e => { const k = srvJ(e), d = del.get(k) || 0; if (d > 0) { del.set(k, d - 1); return; } out.push(e); });
+            const add = new Map(); cl.forEach((n, k) => { const d = n - (cb.get(k) || 0); if (d > 0) add.set(k, d); });
+            const radd = new Map(); cr.forEach((n, k) => { const d = n - (cb.get(k) || 0); if (d > 0) radd.set(k, d); });
+            l.forEach(e => { const k = srvJ(e), d = add.get(k) || 0; if (d <= 0) return; add.set(k, d - 1); const ra = radd.get(k) || 0; if (ra > 0) { radd.set(k, ra - 1); return; } out.push(e); });
+            return out;
+        }
+        if (typeof l === 'number' && typeof r === 'number') return Math.max(l, r); // dates : la plus récente
+        return l; // même réglage modifié des deux côtés : cet appareil l'emporte
+    }
+
+    // --- échanges avec l'ordinateur ---
+    async function srvApi(path, opt) {
+        const ctl = new AbortController(), to = setTimeout(() => ctl.abort(), 15000);
+        try {
+            const r = await fetch(path, Object.assign({ cache: 'no-store', signal: ctl.signal }, opt || {}));
+            if (r.status === 409) return Object.assign({ conflict: true }, await r.json());
+            if (!r.ok) throw new Error('erreur ' + r.status);
+            return await r.json();
+        } finally { clearTimeout(to); }
+    }
+    function srvUiBusy() {
+        const a = document.activeElement;
+        if (a && (a.tagName === 'INPUT' || a.tagName === 'TEXTAREA' || a.tagName === 'SELECT' || a.isContentEditable)) return true;
+        return [...document.querySelectorAll('[id$="-modal"]')].some(m => !m.classList.contains('hidden') && getComputedStyle(m).display !== 'none');
+    }
+    function srvRefresh() {
+        try {
+            const s = _curScreen;
+            if (s === 'teacher-view') { renderTeacherClassSelector(); const act = document.querySelector('#teacher-tabs .tab-btn.active'); switchTab(act ? act.dataset.tab : 'summary-section'); }
+            else if (s === 'select-class-screen') renderSelectClassScreen();
+            else if (s === 'select-student-screen') renderSelectStudentScreen();
+            else if (s === 'student-dashboard-screen') renderStudentDashboard();
+            else if (s === 'display-screen') renderDisplay();
+        } catch (e) { console.error('Rafraîchissement après synchronisation :', e); }
+    }
+    function srvApplyLocal(m) {
+        const keep = {}; SRV_LOCAL.forEach(k => { if (appState[k] !== undefined) keep[k] = appState[k]; });
+        appState = Object.assign(JSON.parse(JSON.stringify(m)), keep);
+        if (!appState.availableAvatars) appState.availableAvatars = DEFAULT_AVATARS;
+        const ids = Object.keys(appState.classes || {});
+        if (currentTeacherClassId && !appState.classes[currentTeacherClassId]) currentTeacherClassId = ids[0] || null;
+        if (!currentTeacherClassId && ids.length) currentTeacherClassId = ids[0];
+        const cls = selectedStudentClassId && appState.classes[selectedStudentClassId];
+        if (selectedStudentClassId && !cls) { selectedStudentClassId = null; selectedStudentId = null; if (['select-student-screen', 'student-dashboard-screen'].includes(_curScreen)) showScreen('select-class-screen'); }
+        else if (cls && selectedStudentId && !(cls.students || []).some(s => s.id === selectedStudentId)) { selectedStudentId = null; if (_curScreen === 'student-dashboard-screen') showScreen('select-student-screen'); }
+        syBaseline(); _sySave();
+        srvRefresh();
+    }
+    async function srvCycle(force, tries) {
+        if (!SRV.on || SRV.busy) return;
+        if (!force && srvUiBusy()) { srvKick(2500); return; }
+        SRV.busy = true;
+        let again = false;
+        try {
+            const v = await srvApi('/api/version');
+            SRV.id = v.id; SRV.empty = !v.version;
+            if (SRV.empty) { SRV.ok = true; SRV.err = ''; SRV.last = Date.now(); return; }
+            const meta = srvGetMeta(), known = !!meta && meta.id === v.id;
+            const baseStr = known ? srvGetBase() : null, localLight = srvLight(appState);
+            if (known && meta.version === v.version && baseStr === localLight) { SRV.version = v.version; SRV.ok = true; SRV.err = ''; SRV.last = Date.now(); srvClearChanges(); return; }
+            let remote = null, rver = v.version, rid = v.id;
+            if (!(known && meta.version === v.version)) { const s = await srvApi('/api/state'); remote = s.state; rver = s.version; rid = s.id; }
+            let merged;
+            if (!known || !baseStr) {
+                // premier contact avec cet ordinateur : l'appareil prend les données de l'ordinateur (copie de sécurité avant)
+                sySnapshotNow('avant 1re synchronisation');
+                merged = remote;
+            } else {
+                const B = JSON.parse(baseStr), L = JSON.parse(localLight), R = remote ? JSON.parse(srvLight(remote)) : B;
+                merged = srvResolve(srvMerge(B, L, R), srvImgMap(appState, remote || {}));
+            }
+            const mergedLight = srvLight(merged), remoteLight = remote ? srvLight(remote) : baseStr;
+            if (mergedLight !== remoteLight) {
+                const res = await srvApi('/api/state', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: rid, base: rver, state: srvShared(merged) }) });
+                if (res.conflict) { again = (tries || 0) < 5; return; } // un autre appareil vient d'écrire : on recommence
+                rver = res.version;
+            }
+            if (mergedLight !== localLight) srvApplyLocal(merged);
+            srvSetBase(rid, rver, mergedLight);
+            SRV.version = rver; SRV.ok = true; SRV.err = ''; SRV.last = Date.now();
+            srvClearChanges();
+        } catch (e) { SRV.ok = false; SRV.err = e.name === 'AbortError' ? 'délai dépassé' : e.message; }
+        finally { SRV.busy = false; srvStatus(); if (again) srvCycle(true, (tries || 0) + 1); }
+    }
+    function srvClearChanges() { const s = syEnsure(); if (s.changes) { s.changes = 0; s.lastTransfer = Date.now(); _sySave(); syRender(); } }
+    function srvKick(ms) { clearTimeout(SRV.timer); SRV.timer = setTimeout(() => srvCycle(false), ms); }
+    async function srvUpload() {
+        const msg = SRV.empty ? "Envoyer les données de cet appareil à l'ordinateur ?\n\nElles deviendront les données de référence pour toutes les tablettes."
+            : "⚠️ Remplacer TOUTES les données de l'ordinateur par celles de cet appareil ?\n\nLes tablettes recevront ces données. Leurs changements pas encore synchronisés seront conservés si possible.";
+        if (!confirm(msg)) return;
+        try {
+            const v = await srvApi('/api/version');
+            const res = await srvApi('/api/state', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: v.id, base: v.version, state: srvShared(appState) }) });
+            if (res.conflict) { toast("L'ordinateur vient d'être modifié : réessaie."); return; }
+            srvSetBase(v.id, res.version, srvLight(appState));
+            Object.assign(SRV, { id: v.id, version: res.version, empty: false, ok: true, err: '', last: Date.now() });
+            srvClearChanges(); toast("✅ Données envoyées à l'ordinateur");
+        } catch (e) { toast('❌ Envoi impossible : ' + e.message); }
+        srvStatus();
+    }
+
+    // --- affichage de l'état ---
+    function srvText() {
+        if (SRV.ok === null) return ['⏳', 'Connexion à l\'ordinateur…', '#6b7280'];
+        if (!SRV.ok) return ['🔴', "Ordinateur injoignable (" + SRV.err + ") : les changements sont gardés sur cet appareil et partiront à son retour.", '#b91c1c'];
+        if (SRV.empty) return ['🟠', "L'ordinateur n'a pas encore de données : envoie-lui celles de cet appareil (bouton ci-dessous) ou restaure d'abord tes données ici.", '#b45309'];
+        const s = Math.max(0, Math.round((Date.now() - SRV.last) / 1000));
+        return ['🟢', 'Synchronisé avec l\'ordinateur (il y a ' + (s < 60 ? s + ' s' : Math.round(s / 60) + ' min') + ').', '#15803d'];
+    }
+    function srvStatus() {
+        const [ic, txt, col] = srvText();
+        let b = document.getElementById('srv-badge');
+        if (!b) { b = document.createElement('button'); b.id = 'srv-badge'; b.style.cssText = 'position:fixed;left:10px;bottom:10px;z-index:60;background:#fff;border:1px solid #d1d5db;border-radius:999px;padding:4px 10px;font-size:13px;box-shadow:0 1px 4px #0002;'; b.addEventListener('click', () => { srvCycle(true); toast(srvText()[1], 5000); }); document.body.appendChild(b); }
+        b.textContent = ic + ' PC'; b.title = txt;
+        const st = document.getElementById('srv-status'); if (st) { st.textContent = ic + ' ' + txt; st.style.color = col; }
+        const up = document.getElementById('srv-upload'); if (up) up.textContent = SRV.empty ? "⬆️ Envoyer les données de cet appareil à l'ordinateur" : "⬆️ Remplacer les données de l'ordinateur par celles-ci";
+    }
+    const _srvRenderSet = renderSettingsSection;
+    renderSettingsSection = function () {
+        _srvRenderSet();
+        if (!SRV.on) return;
+        document.getElementById('settings-section').insertAdjacentHTML('afterbegin', `<div class="mb-6 p-4 border-2 rounded-lg" style="border-color:#86efac;background:#f0fdf4;"><h3 class="text-xl font-bold mb-1 font-title">🖥️ Ordinateur de la classe</h3><p class="text-sm text-gray-600 mb-2">Synchronisation automatique de tous les appareils connectés au même wifi que l'ordinateur.</p><p id="srv-status" class="text-sm font-semibold mb-3"></p><div class="flex flex-wrap gap-2"><button data-srv="now" class="bg-green-600 text-white py-2 px-4">🔄 Synchroniser maintenant</button><button data-srv="upload" id="srv-upload" class="bg-gray-200 py-2 px-4"></button></div></div>`);
+        srvStatus();
+    };
+    document.addEventListener('click', e => {
+        const b = e.target.closest('[data-srv]'); if (!b) return;
+        if (b.dataset.srv === 'now') { srvCycle(true); toast('🔄 Synchronisation…'); }
+        else if (b.dataset.srv === 'upload') srvUpload();
+    });
+    // après une restauration sur un ordinateur encore vide : proposer de lui envoyer les données
+    const _srvHandleRestore = handleRestore;
+    handleRestore = function (data) { _srvHandleRestore(data); if (SRV.on && SRV.empty && appState === data) setTimeout(srvUpload, 900); };
+    // chaque enregistrement déclenche une synchronisation peu après
+    const _srvSave = saveState;
+    saveState = function () { _srvSave(); if (SRV.on) srvKick(1200); };
+    setInterval(() => { if (SRV.on) { srvStatus(); if (!SRV.busy) srvCycle(false); } }, 4000);
+    async function srvInit() {
+        if (!/^https?:/.test(location.protocol)) return;
+        try { const r = await fetch('/api/ping', { cache: 'no-store' }); if (!r.ok) return; const j = await r.json(); if (!j || j.app !== 'ceintures') return; }
+        catch (e) { return; }
+        SRV.on = true; srvStatus(); srvCycle(true);
+    }
+    // --- aller-retour par fichier : un export fait ici retient de quelle version de l'ordinateur il vient ---
+    // Au retour, la restauration de ce fichier FUSIONNE les corrections faites ailleurs avec ce qui a changé
+    // depuis sur l'ordinateur et les tablettes, au lieu de tout remplacer.
+    const _srvTransfer = syTransfer;
+    syTransfer = async function () {
+        if (SRV.on && !SRV.empty) {
+            await srvCycle(true);
+            const meta = srvGetMeta(), base = srvGetBase();
+            if (SRV.ok && meta && base && base === srvLight(appState)) appState._base = { id: meta.id, version: meta.version, light: base };
+            else toast("⚠️ Pas synchronisé avec l'ordinateur : le fichier sera une sauvegarde simple (sa restauration remplacera tout).", 7000);
+        }
+        try { await _srvTransfer(); } finally { delete appState._base; }
+    };
+    async function srvRestoreMerge(data) {
+        const fb = data._base; delete data._base;
+        const choice = confirm("Ce fichier vient de cet ordinateur (version " + fb.version + ").\n\nOK : FUSIONNER tes modifications avec ce qui a changé depuis sur l'ordinateur et les tablettes (recommandé).\nAnnuler : autres choix.");
+        if (!choice) {
+            if (confirm("Remplacer TOUTES les données par celles du fichier ?\n(Les changements faits depuis sur les tablettes seront perdus.)")) { _srvHandleRestore(data); }
+            return;
+        }
+        try {
+            sySnapshotNow('avant fusion du fichier');
+            const s = await srvApi('/api/state');
+            const B = JSON.parse(fb.light), L = JSON.parse(srvLight(data)), R = JSON.parse(srvLight(s.state || {}));
+            const merged = srvResolve(srvMerge(B, L, R), srvImgMap(appState, s.state || {}, data));
+            if (!merged.classes) throw new Error('données invalides');
+            const res = await srvApi('/api/state', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: s.id, base: s.version, state: srvShared(merged) }) });
+            if (res.conflict) { toast("L'ordinateur vient d'être modifié : réessaie dans quelques secondes."); return; }
+            srvApplyLocal(merged); srvSetBase(s.id, res.version, srvLight(merged));
+            Object.assign(SRV, { version: res.version, ok: true, err: '', last: Date.now() }); srvClearChanges(); srvStatus();
+            toast('✅ Fichier fusionné : tes modifications sont envoyées à l\'ordinateur.', 6000);
+        } catch (e) { alert('Fusion impossible : ' + e.message); }
+    }
+    const _srvHandleRestore2 = handleRestore;
+    handleRestore = function (data) {
+        if (SRV.on && !SRV.empty && data && data._base && data._base.id === SRV.id && data.classes) { srvRestoreMerge(data); return; }
+        if (SRV.on && data) delete data._base;
+        _srvHandleRestore2(data);
+    };
+    setTimeout(srvInit, 0);
 
     loadState();
     syInit();
